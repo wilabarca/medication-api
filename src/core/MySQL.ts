@@ -41,6 +41,7 @@ export const pool: Pool = mysql.createPool({
   connectionLimit: 10,
   queueLimit: 0,
   charset: 'utf8mb4',
+  timezone: 'Z', // UTC
   // Las columnas DATE llegan como 'YYYY-MM-DD' (evita desfases de zona horaria)
   dateStrings: ['DATE'],
   ssl: getSSLConfig()
