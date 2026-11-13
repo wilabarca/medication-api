@@ -1,119 +1,135 @@
-
-import { Medication } from "../Domain/Entities/Medication";
+import {
+  Medication,
+  MedicationData,
+  ScheduleData,
+} from "../Domain/Entities/Medication";
 import { MedicationRepository } from "../Domain/Repositories/MedicationRepository";
+import { NotFoundError, ValidationError, requireId } from "../../core/Errors";
+
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const MAX_SCHEDULES = 24;
 
 export class MedicationService {
-  constructor(
-    private readonly medicationRepository: MedicationRepository
-  ) {}
+  constructor(private readonly repository: MedicationRepository) {}
 
-  async create(medication: Medication): Promise<Medication> {
-    this.validateMedication(medication);
+  // El cuidador sale del JWT, nunca del body
+  async create(caregiverId: string, body: any): Promise<Medication> {
+    const patientId = requireId(body?.patientId, "ID del paciente");
+    const data = this.parseFields(body);
 
-    return await this.medicationRepository.create(medication);
+    if (!(await this.repository.patientBelongsTo(patientId, caregiverId))) {
+      throw new NotFoundError("Paciente no encontrado");
+    }
+
+    return this.repository.create({ ...data, patientId });
   }
 
-  async getById(id: string): Promise<Medication | null> {
-    this.validateId(id);
-
-    return await this.medicationRepository.getById(id);
+  async getById(id: string, caregiverId: string): Promise<Medication> {
+    const medication = await this.repository.getOwned(requireId(id, "ID del medicamento"), caregiverId);
+    if (!medication) throw new NotFoundError("Medicamento no encontrado");
+    return medication;
   }
 
-  async getByPatientId(patientId: string): Promise<Medication[]> {
-    this.validateId(patientId);
-
-    return await this.medicationRepository.getByPatientId(patientId);
+  async listByPatient(patientId: string, caregiverId: string): Promise<Medication[]> {
+    const id = requireId(patientId, "ID del paciente");
+    if (!(await this.repository.patientBelongsTo(id, caregiverId))) {
+      throw new NotFoundError("Paciente no encontrado");
+    }
+    return this.repository.getByPatientId(id);
   }
 
-  async getByCaregiverId(caregiverId: string): Promise<Medication[]> {
-    this.validateId(caregiverId);
-
-    return await this.medicationRepository.getByCaregiverId(caregiverId);
+  // Teléfono del paciente: ya autenticado con su device_token
+  async listForDevice(patientId: string): Promise<Medication[]> {
+    return this.repository.getByPatientId(patientId);
   }
 
-  async getAll(): Promise<Medication[]> {
-    return await this.medicationRepository.getAll();
+  async update(id: string, caregiverId: string, body: any): Promise<Medication> {
+    const medication = await this.getById(id, caregiverId);
+    return this.repository.update(medication.id, this.parseFields(body));
   }
 
-  async update(medication: Medication): Promise<Medication> {
-    this.validateId(medication.id);
-    this.validateMedication(medication);
-
-    const existingMedication =
-      await this.medicationRepository.getById(medication.id);
-
-    if (!existingMedication) {
-      throw new Error("Medicamento no encontrado");
-    }
-
-    return await this.medicationRepository.update(medication);
+  async delete(id: string, caregiverId: string): Promise<void> {
+    const medication = await this.getById(id, caregiverId);
+    await this.repository.delete(medication.id);
   }
 
-  async delete(id: string): Promise<void> {
-    this.validateId(id);
+  // ---------- validación ----------
+  private parseFields(body: any): Omit<MedicationData, "patientId"> {
+    const name = this.requiredText(body?.name, "El nombre del medicamento", 150);
+    const dosage = this.requiredText(body?.dosage, "La dosis del medicamento", 100);
 
-    const existingMedication =
-      await this.medicationRepository.getById(id);
-
-    if (!existingMedication) {
-      throw new Error("Medicamento no encontrado");
+    const startDate = this.parseDate(body?.startDate, "fecha de inicio", true)!;
+    const endDate = this.parseDate(body?.endDate, "fecha de finalización", false);
+    if (endDate && endDate < startDate) {
+      throw new ValidationError("La fecha de finalización no puede ser anterior a la de inicio");
     }
 
-    await this.medicationRepository.delete(id);
+    return {
+      name,
+      dosage,
+      description: this.optionalText(body?.description, "La descripción", 5000),
+      instructions: this.optionalText(body?.instructions, "Las indicaciones", 5000),
+      imageUrl: this.optionalText(body?.imageUrl, "La URL de la imagen", 500),
+      startDate,
+      endDate,
+      schedules: this.parseSchedules(body?.schedules),
+    };
   }
 
-  private validateMedication(medication: Medication): void {
-    if (!medication.patientId?.trim()) {
-      throw new Error("El ID del paciente es obligatorio");
+  private parseSchedules(value: unknown): ScheduleData[] {
+    if (value === undefined || value === null) return [];
+    if (!Array.isArray(value)) {
+      throw new ValidationError("Los horarios del medicamento no son válidos");
+    }
+    if (value.length > MAX_SCHEDULES) {
+      throw new ValidationError(`Máximo ${MAX_SCHEDULES} horarios por medicamento`);
     }
 
-    if (!medication.caregiverId?.trim()) {
-      throw new Error("El ID del cuidador es obligatorio");
-    }
-
-    if (!medication.name?.trim()) {
-      throw new Error("El nombre del medicamento es obligatorio");
-    }
-
-    if (!medication.dosage?.trim()) {
-      throw new Error("La dosis del medicamento es obligatoria");
-    }
-
-    if (
-      medication.endDate &&
-      medication.endDate < medication.startDate
-    ) {
-      throw new Error(
-        "La fecha de finalización no puede ser anterior a la fecha de inicio"
-      );
-    }
-
-    if (!Array.isArray(medication.schedules)) {
-      throw new Error("Los horarios del medicamento no son válidos");
-    }
-
-    for (const schedule of medication.schedules) {
-      if (!schedule.time || !/^([01]\d|2[0-3]):[0-5]\d$/.test(schedule.time)) {
-        throw new Error("Cada horario debe tener el formato HH:mm");
+    return value.map((s: any) => {
+      if (typeof s?.time !== "string" || !TIME_RE.test(s.time)) {
+        throw new ValidationError("Cada horario debe tener el formato HH:mm");
       }
-
       if (
-        !Array.isArray(schedule.daysOfWeek) ||
-        schedule.daysOfWeek.length === 0 ||
-        schedule.daysOfWeek.some(
-          (day) => !Number.isInteger(day) || day < 0 || day > 6
-        )
+        !Array.isArray(s.daysOfWeek) ||
+        s.daysOfWeek.length === 0 ||
+        s.daysOfWeek.some((d: unknown) => !Number.isInteger(d) || (d as number) < 0 || (d as number) > 6)
       ) {
-        throw new Error(
-          "Cada horario debe tener al menos un día válido de la semana (0-6)"
-        );
+        throw new ValidationError("Cada horario debe tener al menos un día válido de la semana (0-6)");
       }
-    }
+
+      const days = [...new Set<number>(s.daysOfWeek)].sort((a, b) => a - b);
+      return { time: s.time, daysOfWeek: days, enabled: s.enabled === undefined ? true : Boolean(s.enabled) };
+    });
   }
 
-  private validateId(id: string): void {
-    if (!id?.trim()) {
-      throw new Error("El identificador es obligatorio");
+  private parseDate(value: unknown, label: string, required: boolean): string | null {
+    if (value === undefined || value === null || value === "") {
+      if (required) throw new ValidationError(`La ${label} es obligatoria`);
+      return null;
     }
+    if (typeof value !== "string" || !DATE_RE.test(value) ||
+        new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) !== value) {
+      throw new ValidationError(`La ${label} debe tener el formato YYYY-MM-DD`);
+    }
+    return value;
+  }
+
+  private requiredText(value: unknown, label: string, max: number): string {
+    if (typeof value !== "string" || !value.trim()) {
+      throw new ValidationError(`${label} es obligatorio`);
+    }
+    if (value.trim().length > max) {
+      throw new ValidationError(`${label} no puede superar ${max} caracteres`);
+    }
+    return value.trim();
+  }
+
+  private optionalText(value: unknown, label: string, max: number): string | null {
+    if (value === undefined || value === null) return null;
+    if (typeof value !== "string" || value.trim().length > max) {
+      throw new ValidationError(`${label} no es válido (máx. ${max} caracteres)`);
+    }
+    return value.trim() || null;
   }
 }

@@ -1,186 +1,66 @@
-
-import { Request, Response } from "express";
-import { Medication } from "../../Domain/Entities/Medication";
+import { Response } from "express";
 import { MedicationService } from "../../Application/MedicationService";
+import { AuthRequest, DeviceRequest } from "../../../core/AuthMiddleware";
+import { sendError } from "../../../core/Errors";
 
 export class MedicationController {
-  constructor(
-    private readonly medicationService: MedicationService
-  ) {}
+  constructor(private readonly service: MedicationService) {}
 
-  /**
-   * Convierte un parámetro de ruta en string
-   * y evita el error string | string[] de TypeScript.
-   */
-  private getParam(value: unknown): string {
-    if (typeof value !== "string" || !value.trim()) {
-      throw new Error("Parámetro de ruta inválido");
-    }
-
-    return value.trim();
-  }
-
-  // CREAR MEDICAMENTO
-  async create(req: Request, res: Response): Promise<void> {
+  // POST /api/medications
+  async create(req: AuthRequest, res: Response): Promise<void> {
     try {
-      const medication = req.body as Medication;
-
-      const createdMedication =
-        await this.medicationService.create(medication);
-
-      res.status(201).json({
-        message: "Medicamento creado correctamente",
-        data: createdMedication,
-      });
-    } catch (error: unknown) {
-      this.handleError(res, error);
+      const medication = await this.service.create(req.user!.id, req.body);
+      res.status(201).json({ message: "Medicamento creado correctamente", data: medication });
+    } catch (error) {
+      sendError(res, error, "MedicationController.create");
     }
   }
 
-  // OBTENER MEDICAMENTO POR ID
-  async getById(req: Request, res: Response): Promise<void> {
+  // GET /api/medications/:id
+  async getById(req: AuthRequest, res: Response): Promise<void> {
     try {
-      const id = this.getParam(req.params.id);
-
-      const medication =
-        await this.medicationService.getById(id);
-
-      if (!medication) {
-        res.status(404).json({
-          message: "Medicamento no encontrado",
-        });
-        return;
-      }
-
-      res.status(200).json({
-        data: medication,
-      });
-    } catch (error: unknown) {
-      this.handleError(res, error);
+      res.status(200).json({ data: await this.service.getById(String(req.params.id), req.user!.id) });
+    } catch (error) {
+      sendError(res, error, "MedicationController.getById");
     }
   }
 
-  // OBTENER MEDICAMENTOS POR PACIENTE
-  async getByPatientId(
-    req: Request,
-    res: Response
-  ): Promise<void> {
+  // GET /api/patients/:patientId/medications
+  async getByPatient(req: AuthRequest, res: Response): Promise<void> {
     try {
-      const patientId = this.getParam(req.params.patientId);
-
-      const medications =
-        await this.medicationService.getByPatientId(patientId);
-
-      res.status(200).json({
-        data: medications,
-      });
-    } catch (error: unknown) {
-      this.handleError(res, error);
+      const data = await this.service.listByPatient(String(req.params.patientId), req.user!.id);
+      res.status(200).json({ data });
+    } catch (error) {
+      sendError(res, error, "MedicationController.getByPatient");
     }
   }
 
-  // OBTENER MEDICAMENTOS POR CUIDADOR
-  async getByCaregiverId(
-    req: Request,
-    res: Response
-  ): Promise<void> {
+  // GET /api/device/medications   (teléfono del paciente, con su device_token)
+  async getForDevice(req: DeviceRequest, res: Response): Promise<void> {
     try {
-      const caregiverId = this.getParam(req.params.caregiverId);
-
-      const medications =
-        await this.medicationService.getByCaregiverId(caregiverId);
-
-      res.status(200).json({
-        data: medications,
-      });
-    } catch (error: unknown) {
-      this.handleError(res, error);
+      res.status(200).json({ data: await this.service.listForDevice(req.patientId!) });
+    } catch (error) {
+      sendError(res, error, "MedicationController.getForDevice");
     }
   }
 
-  // OBTENER TODOS LOS MEDICAMENTOS
-  async getAll(req: Request, res: Response): Promise<void> {
+  // PUT /api/medications/:id
+  async update(req: AuthRequest, res: Response): Promise<void> {
     try {
-      const medications = await this.medicationService.getAll();
-
-      res.status(200).json({
-        data: medications,
-      });
-    } catch (error: unknown) {
-      this.handleError(res, error);
+      const medication = await this.service.update(String(req.params.id), req.user!.id, req.body);
+      res.status(200).json({ message: "Medicamento actualizado correctamente", data: medication });
+    } catch (error) {
+      sendError(res, error, "MedicationController.update");
     }
   }
 
-  // ACTUALIZAR MEDICAMENTO
-  async update(req: Request, res: Response): Promise<void> {
+  // DELETE /api/medications/:id
+  async delete(req: AuthRequest, res: Response): Promise<void> {
     try {
-      const id = this.getParam(req.params.id);
-
-      const medication: Medication = {
-        ...req.body,
-        id,
-      } as Medication;
-
-      const updatedMedication =
-        await this.medicationService.update(medication);
-
-      res.status(200).json({
-        message: "Medicamento actualizado correctamente",
-        data: updatedMedication,
-      });
-    } catch (error: unknown) {
-      this.handleError(res, error);
+      await this.service.delete(String(req.params.id), req.user!.id);
+      res.status(200).json({ message: "Medicamento eliminado correctamente" });
+    } catch (error) {
+      sendError(res, error, "MedicationController.delete");
     }
-  }
-
-  // ELIMINAR MEDICAMENTO
-  async delete(req: Request, res: Response): Promise<void> {
-    try {
-      const id = this.getParam(req.params.id);
-
-      await this.medicationService.delete(id);
-
-      res.status(200).json({
-        message: "Medicamento eliminado correctamente",
-      });
-    } catch (error: unknown) {
-      this.handleError(res, error);
-    }
-  }
-
-  // MANEJO CENTRALIZADO DE ERRORES
-  private handleError(res: Response, error: unknown): void {
-    const message =
-      error instanceof Error
-        ? error.message
-        : "Error interno del servidor";
-
-    if (message === "Medicamento no encontrado") {
-      res.status(404).json({ message });
-      return;
-    }
-
-    if (
-      message === "Parámetro de ruta inválido" ||
-      message.toLowerCase().includes("inválido") ||
-      message.toLowerCase().includes("requerido") ||
-      message.toLowerCase().includes("obligatorio") ||
-      message.toLowerCase().includes("fecha") ||
-      message.toLowerCase().includes("dosis") ||
-      message.toLowerCase().includes("medicamento") ||
-      message.toLowerCase().includes("horario") ||
-      message.toLowerCase().includes("schedule") ||
-      message.toLowerCase().includes("patientid") ||
-      message.toLowerCase().includes("caregiverid")
-    ) {
-      res.status(400).json({ message });
-      return;
-    }
-
-    console.error("Error en MedicationController:", error);
-
-    res.status(500).json({
-      message: "Error interno del servidor",
-    });
   }
 }

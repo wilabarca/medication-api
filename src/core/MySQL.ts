@@ -1,8 +1,8 @@
-
 import mysql, { Pool, PoolConnection } from 'mysql2/promise';
 import dotenv from 'dotenv';
 import fs from 'node:fs';
 import path from 'node:path';
+import { SCHEMA } from './Schema';
 
 dotenv.config();
 
@@ -41,6 +41,8 @@ export const pool: Pool = mysql.createPool({
   connectionLimit: 10,
   queueLimit: 0,
   charset: 'utf8mb4',
+  // Las columnas DATE llegan como 'YYYY-MM-DD' (evita desfases de zona horaria)
+  dateStrings: ['DATE'],
   ssl: getSSLConfig()
 });
 
@@ -52,71 +54,28 @@ export async function getConnection(): Promise<PoolConnection> {
 // Cerrar todas las conexiones.
 export async function closeConnection(): Promise<void> {
   await pool.end();
-  console.log('✅ Pool de MySQL cerrado');
+  console.log('Pool de MySQL cerrado');
 }
 
-// Crear las tablas necesarias para Medication.
+// Crear las tablas que falten (idempotente, en orden de FKs).
 async function createTables(): Promise<void> {
-  // Usuarios: pacientes y cuidadores.
-  await pool.execute(`
-    CREATE TABLE IF NOT EXISTS users (
-      id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-      name VARCHAR(100) NOT NULL,
-      email VARCHAR(150) NOT NULL UNIQUE,
-      password VARCHAR(255) NOT NULL,
-      role ENUM('patient', 'caregiver') NOT NULL DEFAULT 'patient',
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        ON UPDATE CURRENT_TIMESTAMP
-    ) ENGINE=InnoDB
-      DEFAULT CHARSET=utf8mb4
-      COLLATE=utf8mb4_unicode_ci
-  `);
-
-  // Medicamentos asociados a un usuario.
-  await pool.execute(`
-    CREATE TABLE IF NOT EXISTS medications (
-      id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-      user_id INT UNSIGNED NOT NULL,
-      name VARCHAR(150) NOT NULL,
-      dosage VARCHAR(100) NOT NULL,
-      frequency VARCHAR(100) NOT NULL,
-      instructions TEXT NULL,
-      start_date DATE NULL,
-      end_date DATE NULL,
-      reminder_time TIME NULL,
-      active BOOLEAN NOT NULL DEFAULT TRUE,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        ON UPDATE CURRENT_TIMESTAMP,
-
-      INDEX idx_medications_user_id (user_id),
-
-      CONSTRAINT fk_medications_user
-        FOREIGN KEY (user_id)
-        REFERENCES users(id)
-        ON DELETE CASCADE
-        ON UPDATE CASCADE
-    ) ENGINE=InnoDB
-      DEFAULT CHARSET=utf8mb4
-      COLLATE=utf8mb4_unicode_ci
-  `);
-
-  console.log('✅ Tablas users y medications verificadas/creadas');
+  for (const table of SCHEMA) {
+    await pool.query(table.sql);
+    console.log(`Tabla verificada: ${table.name}`);
+  }
 }
 
 // Verificar conexión e inicializar tablas.
 export async function initDB(): Promise<void> {
   try {
     await pool.query('SELECT 1');
-
-    console.log('✅ Conexión con MySQL establecida');
+    console.log('Conexión con MySQL establecida');
 
     await createTables();
 
-    console.log('✅ Base de datos de Medication inicializada');
+    console.log('Base de datos de Medication inicializada');
   } catch (error) {
-    console.error('❌ Error inicializando MySQL:', error);
+    console.error('Error inicializando MySQL:', error);
     throw error;
   }
 }

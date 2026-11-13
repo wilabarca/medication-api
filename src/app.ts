@@ -2,16 +2,22 @@ import express from "express";
 import cors from "cors";
 
 import { RegisterUserRoutes } from "./users/Infraestructure/Routers/UserRoutes";
+import { RegisterPatientRoutes } from "../src/users/Infraestructure/Routers/Patientroutes";
 import { RegisterMedicationRoutes } from "./medication/Infraestructure/Routers/MedicationRoutes";
 
 import { UserController } from "./users/Infraestructure/Controllers/UserController";
 import { UserService } from "./users/Application/UserService";
 import { MySQLUserRepository } from "./users/Infraestructure/DataBase/MySQLUserRepository";
 
+import { PatientController } from "../src/users/Infraestructure/Controllers/Patientscontroller";
+import { PatientService } from "../src/users/Application/Patientservice";
+import { MySQLPatientRepository } from "../src/users/Infraestructure/DataBase/Mysqlpatientrepository";
+
 import { MedicationController } from "./medication/Infraestructure/Controllers/MedicationController";
 import { MedicationService } from "./medication/Application/MedicationService";
 import { MySQLMedicationRepository } from "./medication/Infraestructure/DataBase/MySQLMedicationRepository";
 
+import { deviceAuthMiddleware } from "./core/AuthMiddleware";
 import { initDB, pool } from "./core/MySQL";
 
 const app = express();
@@ -73,25 +79,30 @@ export async function initializeRoutes(): Promise<void> {
   // Comprobar conexión y crear las tablas.
   await initDB();
 
-  console.log("Conexión con MySQL establecida");
-
-  // Módulo de usuarios.
+  // Módulo de usuarios (cuidadores).
   const userRepository = new MySQLUserRepository(pool);
   const userService = new UserService(userRepository);
   const userController = new UserController(userService);
 
-  // Módulo de medicamentos.
+  // Módulo de pacientes y vinculación por código/QR.
+  const patientRepository = new MySQLPatientRepository(pool);
+  const patientService = new PatientService(patientRepository);
+  const patientController = new PatientController(patientService);
+
+  // Módulo de medicamentos (con sus horarios).
   const medicationRepository = new MySQLMedicationRepository(pool);
-  const medicationService = new MedicationService(
-    medicationRepository
-  );
-  const medicationController = new MedicationController(
-    medicationService
+  const medicationService = new MedicationService(medicationRepository);
+  const medicationController = new MedicationController(medicationService);
+
+  // Autenticación del teléfono del paciente (device_token).
+  const deviceAuth = deviceAuthMiddleware((token) =>
+    patientService.authenticateDevice(token)
   );
 
   // Registrar las rutas de los módulos.
   RegisterUserRoutes(app, userController);
-  RegisterMedicationRoutes(app, medicationController);
+  RegisterPatientRoutes(app, patientController);
+  RegisterMedicationRoutes(app, medicationController, deviceAuth);
 
   // Ruta principal.
   app.get("/", (_req, res) => {
@@ -99,7 +110,7 @@ export async function initializeRoutes(): Promise<void> {
       success: true,
       message: "API Medication",
       version: "1.0.0",
-      modules: ["User", "Medication"],
+      modules: ["Auth", "Patients", "Medication"],
       timestamp: new Date().toISOString(),
     });
   });

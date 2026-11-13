@@ -1,48 +1,29 @@
-
-import { Router } from "express";
+import { RequestHandler, Router } from "express";
 import { MedicationController } from "../Controllers/MedicationController";
+import { authMiddleware, AuthRequest, DeviceRequest } from "../../../core/AuthMiddleware";
 
 export function RegisterMedicationRoutes(
   router: Router,
-  medicationController: MedicationController
+  controller: MedicationController,
+  deviceAuth: RequestHandler
 ): void {
+  // ---- Cuidador (JWT) ----
+  const group = Router();
+  group.use(authMiddleware);
 
-  const medicationGroup = Router();
+  group.post("/", (req, res) => controller.create(req as AuthRequest, res));
+  group.get("/:id", (req, res) => controller.getById(req as AuthRequest, res));
+  group.put("/:id", (req, res) => controller.update(req as AuthRequest, res));
+  group.delete("/:id", (req, res) => controller.delete(req as AuthRequest, res));
 
-  // GET ALL
-  medicationGroup.get("/", (req, res) =>
-    medicationController.getAll(req, res)
+  router.use("/api/medications", group);
+
+  router.get("/api/patients/:patientId/medications", authMiddleware, (req, res) =>
+    controller.getByPatient(req as AuthRequest, res)
   );
 
-  // GET BY ID
-  medicationGroup.get("/:id", (req, res) =>
-    medicationController.getById(req, res)
+  // ---- Teléfono del paciente (device_token) ----
+  router.get("/api/device/medications", deviceAuth, (req, res) =>
+    controller.getForDevice(req as DeviceRequest, res)
   );
-
-  // GET BY PATIENT
-  medicationGroup.get("/patient/:patientId", (req, res) =>
-    medicationController.getByPatientId(req, res)
-  );
-
-  // GET BY CAREGIVER
-  medicationGroup.get("/caregiver/:caregiverId", (req, res) =>
-    medicationController.getByCaregiverId(req, res)
-  );
-
-  // CREATE
-  medicationGroup.post("/", (req, res) =>
-    medicationController.create(req, res)
-  );
-
-  // UPDATE
-  medicationGroup.put("/:id", (req, res) =>
-    medicationController.update(req, res)
-  );
-
-  // DELETE
-  medicationGroup.delete("/:id", (req, res) =>
-    medicationController.delete(req, res)
-  );
-
-  router.use("/medications", medicationGroup);
 }

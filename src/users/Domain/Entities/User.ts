@@ -1,13 +1,10 @@
-
-export type UserRole = "PATIENT" | "CAREGIVER";
-
+// Cuenta de acceso del CUIDADOR. El paciente es una entidad aparte (Patient).
 export interface User {
   id: string;
   name: string;
   email: string;
-  password: string;
-  role: UserRole;
-  is_active: boolean;
+  password: string; // hash bcrypt
   created_at: Date;
-  updated_at: Date;
 }
+
+export type NewUser = Pick<User, "name" | "email" | "password">;

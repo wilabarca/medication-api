@@ -1,99 +1,116 @@
-
 import mysql from "mysql2/promise";
-import { Medication, MedicationSchedule } from "../../Domain/Entities/Medication";
+import {
+  Medication,
+  MedicationData,
+  MedicationSchedule,
+  ScheduleData,
+} from "../../Domain/Entities/Medication";
 import { MedicationRepository } from "../../Domain/Repositories/MedicationRepository";
 
 type MedicationRow = {
   id: string | number;
   patient_id: string | number;
-  caregiver_id: string | number;
   name: string;
+  description: string | null;
   dosage: string;
   instructions: string | null;
+  image_url: string | null;
   start_date: Date | string;
   end_date: Date | string | null;
-  active: number | boolean;
   created_at: Date;
-  updated_at: Date;
 };
 
-type MedicationScheduleRow = {
+type ScheduleRow = {
   id: string | number;
   medication_id: string | number;
-  time: string;
-  days_of_week: number[] | string;
-  enabled: number | boolean;
-  created_at: Date;
-  updated_at: Date;
+  reminder_time: string;
+  days_of_week: number[] | string | null;
+  is_active: number | boolean;
 };
+
+function toDateString(value: Date | string): string {
+  if (typeof value === "string") return value.slice(0, 10);
+  const m = String(value.getMonth() + 1).padStart(2, "0");
+  const d = String(value.getDate()).padStart(2, "0");
+  return `${value.getFullYear()}-${m}-${d}`;
+}
 
 export class MySQLMedicationRepository implements MedicationRepository {
   constructor(private db: mysql.Pool) {}
 
-  // Convertir un registro de MySQL a MedicationSchedule
-  private mapScheduleRow(row: MedicationScheduleRow): MedicationSchedule {
-    let daysOfWeek: number[];
-
-    if (Array.isArray(row.days_of_week)) {
-      daysOfWeek = row.days_of_week;
-    } else {
-      daysOfWeek = JSON.parse(row.days_of_week) as number[];
-    }
+  private mapSchedule(row: ScheduleRow): MedicationSchedule {
+    let days: number[] = [];
+    if (Array.isArray(row.days_of_week)) days = row.days_of_week;
+    else if (typeof row.days_of_week === "string") days = JSON.parse(row.days_of_week);
 
     return {
       id: String(row.id),
       medicationId: String(row.medication_id),
-      time: row.time,
-      daysOfWeek,
-      enabled: Boolean(row.enabled),
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
+      time: String(row.reminder_time).slice(0, 5), // "HH:mm:ss" -> "HH:mm"
+      daysOfWeek: days,
+      enabled: Boolean(row.is_active),
     };
   }
 
-  // Obtener horarios de un medicamento
-  private async getSchedulesByMedicationId(
-    medicationId: string
-  ): Promise<MedicationSchedule[]> {
-    const [rows] = await this.db.execute<mysql.RowDataPacket[]>(
-      `SELECT *
-       FROM medication_schedules
-       WHERE medication_id = ?
-       ORDER BY time ASC`,
-      [medicationId]
+  // Una sola consulta para los horarios de todos los medicamentos (evita N+1)
+  private async attachSchedules(rows: MedicationRow[]): Promise<Medication[]> {
+    if (rows.length === 0) return [];
+
+    const ids = rows.map((r) => r.id);
+    const placeholders = ids.map(() => "?").join(",");
+    const [scheduleRows] = await this.db.execute<mysql.RowDataPacket[]>(
+      `SELECT * FROM medication_schedules
+       WHERE medication_id IN (${placeholders})
+       ORDER BY reminder_time ASC`,
+      ids
     );
 
-    return rows.map((row) =>
-      this.mapScheduleRow(row as MedicationScheduleRow)
-    );
-  }
+    const byMedication = new Map<string, MedicationSchedule[]>();
+    for (const row of scheduleRows as ScheduleRow[]) {
+      const schedule = this.mapSchedule(row);
+      const list = byMedication.get(schedule.medicationId) ?? [];
+      list.push(schedule);
+      byMedication.set(schedule.medicationId, list);
+    }
 
-  // Convertir un registro de MySQL a Medication
-  private async mapMedicationRow(
-    row: MedicationRow
-  ): Promise<Medication> {
-    const id = String(row.id);
-
-    const schedules = await this.getSchedulesByMedicationId(id);
-
-    return {
-      id,
+    return rows.map((row) => ({
+      id: String(row.id),
       patientId: String(row.patient_id),
-      caregiverId: String(row.caregiver_id),
       name: row.name,
+      description: row.description,
       dosage: row.dosage,
       instructions: row.instructions,
-      startDate: new Date(row.start_date),
-      endDate: row.end_date ? new Date(row.end_date) : null,
-      active: Boolean(row.active),
-      schedules,
+      imageUrl: row.image_url,
+      startDate: toDateString(row.start_date),
+      endDate: row.end_date ? toDateString(row.end_date) : null,
+      schedules: byMedication.get(String(row.id)) ?? [],
       createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    };
+    }));
   }
 
-  // Crear medicamento y sus horarios
-  async create(medication: Medication): Promise<Medication> {
+  private async findById(id: string): Promise<Medication | null> {
+    const [rows] = await this.db.execute<mysql.RowDataPacket[]>(
+      `SELECT * FROM medications WHERE id = ? LIMIT 1`,
+      [id]
+    );
+    return (await this.attachSchedules(rows as MedicationRow[]))[0] ?? null;
+  }
+
+  private async insertSchedules(
+    connection: mysql.PoolConnection,
+    medicationId: string | number,
+    schedules: ScheduleData[]
+  ): Promise<void> {
+    for (const schedule of schedules) {
+      await connection.execute(
+        `INSERT INTO medication_schedules (medication_id, reminder_time, days_of_week, is_active)
+         VALUES (?, ?, ?, ?)`,
+        [medicationId, schedule.time, JSON.stringify(schedule.daysOfWeek), schedule.enabled]
+      );
+    }
+  }
+
+  async create(data: MedicationData): Promise<Medication> {
     const connection = await this.db.getConnection();
 
     try {
@@ -101,45 +118,19 @@ export class MySQLMedicationRepository implements MedicationRepository {
 
       const [result] = await connection.execute<mysql.ResultSetHeader>(
         `INSERT INTO medications
-          (patient_id, caregiver_id, name, dosage, instructions,
-           start_date, end_date, active)
+          (patient_id, name, description, dosage, instructions, image_url, start_date, end_date)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [
-          medication.patientId,
-          medication.caregiverId,
-          medication.name,
-          medication.dosage,
-          medication.instructions,
-          medication.startDate,
-          medication.endDate,
-          medication.active,
+          data.patientId, data.name, data.description, data.dosage,
+          data.instructions, data.imageUrl, data.startDate, data.endDate,
         ]
       );
 
-      const medicationId = String(result.insertId);
-
-      for (const schedule of medication.schedules) {
-        await connection.execute(
-          `INSERT INTO medication_schedules
-            (medication_id, time, days_of_week, enabled)
-           VALUES (?, ?, ?, ?)`,
-          [
-            medicationId,
-            schedule.time,
-            JSON.stringify(schedule.daysOfWeek),
-            schedule.enabled,
-          ]
-        );
-      }
-
+      await this.insertSchedules(connection, result.insertId, data.schedules);
       await connection.commit();
 
-      const created = await this.getById(medicationId);
-
-      if (!created) {
-        throw new Error("No se pudo recuperar el medicamento creado");
-      }
-
+      const created = await this.findById(String(result.insertId));
+      if (!created) throw new Error("No se pudo recuperar el medicamento creado");
       return created;
     } catch (error) {
       await connection.rollback();
@@ -149,68 +140,25 @@ export class MySQLMedicationRepository implements MedicationRepository {
     }
   }
 
-  // Obtener medicamento por ID
-  async getById(id: string): Promise<Medication | null> {
+  async getOwned(id: string, caregiverId: string): Promise<Medication | null> {
     const [rows] = await this.db.execute<mysql.RowDataPacket[]>(
-      `SELECT *
-       FROM medications
-       WHERE id = ?
-       LIMIT 1`,
-      [id]
+      `SELECT m.* FROM medications m
+       JOIN patients p ON p.id = m.patient_id
+       WHERE m.id = ? AND p.caregiver_id = ? LIMIT 1`,
+      [id, caregiverId]
     );
-
-    if (rows.length === 0) {
-      return null;
-    }
-
-    return this.mapMedicationRow(rows[0] as MedicationRow);
+    return (await this.attachSchedules(rows as MedicationRow[]))[0] ?? null;
   }
 
-  // Obtener medicamentos de un paciente
   async getByPatientId(patientId: string): Promise<Medication[]> {
     const [rows] = await this.db.execute<mysql.RowDataPacket[]>(
-      `SELECT *
-       FROM medications
-       WHERE patient_id = ?
-       ORDER BY created_at DESC`,
+      `SELECT * FROM medications WHERE patient_id = ? ORDER BY created_at DESC`,
       [patientId]
     );
-
-    return Promise.all(
-      rows.map((row) => this.mapMedicationRow(row as MedicationRow))
-    );
+    return this.attachSchedules(rows as MedicationRow[]);
   }
 
-  // Obtener medicamentos registrados por un cuidador
-  async getByCaregiverId(caregiverId: string): Promise<Medication[]> {
-    const [rows] = await this.db.execute<mysql.RowDataPacket[]>(
-      `SELECT *
-       FROM medications
-       WHERE caregiver_id = ?
-       ORDER BY created_at DESC`,
-      [caregiverId]
-    );
-
-    return Promise.all(
-      rows.map((row) => this.mapMedicationRow(row as MedicationRow))
-    );
-  }
-
-  // Obtener todos los medicamentos
-  async getAll(): Promise<Medication[]> {
-    const [rows] = await this.db.execute<mysql.RowDataPacket[]>(
-      `SELECT *
-       FROM medications
-       ORDER BY created_at DESC`
-    );
-
-    return Promise.all(
-      rows.map((row) => this.mapMedicationRow(row as MedicationRow))
-    );
-  }
-
-  // Actualizar medicamento y sus horarios
-  async update(medication: Medication): Promise<Medication> {
+  async update(id: string, data: Omit<MedicationData, "patientId">): Promise<Medication> {
     const connection = await this.db.getConnection();
 
     try {
@@ -218,51 +166,23 @@ export class MySQLMedicationRepository implements MedicationRepository {
 
       await connection.execute(
         `UPDATE medications
-         SET patient_id = ?, caregiver_id = ?, name = ?, dosage = ?,
-             instructions = ?, start_date = ?, end_date = ?, active = ?
+         SET name = ?, description = ?, dosage = ?, instructions = ?,
+             image_url = ?, start_date = ?, end_date = ?
          WHERE id = ?`,
         [
-          medication.patientId,
-          medication.caregiverId,
-          medication.name,
-          medication.dosage,
-          medication.instructions,
-          medication.startDate,
-          medication.endDate,
-          medication.active,
-          medication.id,
+          data.name, data.description, data.dosage, data.instructions,
+          data.imageUrl, data.startDate, data.endDate, id,
         ]
       );
 
-      // Reemplazar los horarios existentes por los recibidos
-      await connection.execute(
-        `DELETE FROM medication_schedules
-         WHERE medication_id = ?`,
-        [medication.id]
-      );
-
-      for (const schedule of medication.schedules) {
-        await connection.execute(
-          `INSERT INTO medication_schedules
-            (medication_id, time, days_of_week, enabled)
-           VALUES (?, ?, ?, ?)`,
-          [
-            medication.id,
-            schedule.time,
-            JSON.stringify(schedule.daysOfWeek),
-            schedule.enabled,
-          ]
-        );
-      }
+      // Se reemplazan los horarios por los recibidos
+      await connection.execute(`DELETE FROM medication_schedules WHERE medication_id = ?`, [id]);
+      await this.insertSchedules(connection, id, data.schedules);
 
       await connection.commit();
 
-      const updated = await this.getById(medication.id);
-
-      if (!updated) {
-        throw new Error("No se pudo recuperar el medicamento actualizado");
-      }
-
+      const updated = await this.findById(id);
+      if (!updated) throw new Error("No se pudo recuperar el medicamento actualizado");
       return updated;
     } catch (error) {
       await connection.rollback();
@@ -272,31 +192,16 @@ export class MySQLMedicationRepository implements MedicationRepository {
     }
   }
 
-  // Eliminar medicamento y sus horarios
+  // Los horarios se borran solos (ON DELETE CASCADE)
   async delete(id: string): Promise<void> {
-    const connection = await this.db.getConnection();
+    await this.db.execute(`DELETE FROM medications WHERE id = ?`, [id]);
+  }
 
-    try {
-      await connection.beginTransaction();
-
-      await connection.execute(
-        `DELETE FROM medication_schedules
-         WHERE medication_id = ?`,
-        [id]
-      );
-
-      await connection.execute(
-        `DELETE FROM medications
-         WHERE id = ?`,
-        [id]
-      );
-
-      await connection.commit();
-    } catch (error) {
-      await connection.rollback();
-      throw error;
-    } finally {
-      connection.release();
-    }
+  async patientBelongsTo(patientId: string, caregiverId: string): Promise<boolean> {
+    const [rows] = await this.db.execute<mysql.RowDataPacket[]>(
+      `SELECT 1 FROM patients WHERE id = ? AND caregiver_id = ? LIMIT 1`,
+      [patientId, caregiverId]
+    );
+    return rows.length > 0;
   }
 }
